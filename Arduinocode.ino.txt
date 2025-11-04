@@ -1,0 +1,217 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define SERVO_PIN 6
+#define SS_PIN 10
+#define RST_PIN 9
+#define BUZZER_PIN 8
+#define TEMP_PIN A0
+#define IN1 7
+#define IN2 4
+#define ENA 5
+#define MOTION_PIN 2
+#define RAIN_SENSOR_PIN A1
+#define RAIN_SERVO_PIN 3
+#define RAIN_THRESHOLD 500
+
+Servo myServo;
+Servo rainServo;
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+byte readCard[4];
+String tagID = "";
+
+const int authorizedCount = 3;
+String authorizedTags[authorizedCount] = {
+  "634C81F7", "33588F7", "A3B5C0A0"
+};
+
+unsigned long lastTempPrint = 0;
+unsigned long lastMotionTime = 0;
+const unsigned long motionHoldDuration = 5000;
+unsigned long accessMessageUntil = 0;
+
+float readTemperature();
+boolean getID();
+boolean isAuthorized(String id);
+
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  mfrc522.PCD_Init();
+  delay(4);
+  mfrc522.PCD_DumpVersionToSerial();
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  myServo.attach(SERVO_PIN);
+  myServo.write(0);
+
+  rainServo.attach(RAIN_SERVO_PIN);
+  rainServo.write(0);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Access Control");
+  lcd.setCursor(0, 1);
+  lcd.print("Scan Your Card");
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(MOTION_PIN, INPUT);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 0);
+}
+
+void loop() {
+  bool motionDetected = digitalRead(MOTION_PIN);
+  float currentTemp = readTemperature();
+  int rainValue = analogRead(RAIN_SENSOR_PIN);  // Read analog value from AO pin
+  //Serial.print(rainValue);
+  // Handle rain detection with threshold
+  if (rainValue < RAIN_THRESHOLD) {
+    rainServo.write(150);  // Close or cover due to rain
+  } else {
+    rainServo.write(0);    // Open / no rain
+  }
+
+  // Update last motion time if motion detected
+  if (motionDetected) {
+    lastMotionTime = millis();
+  }
+
+  bool fanShouldRun = (millis() - lastMotionTime) <= motionHoldDuration;
+
+  // Print temp and rain sensor value every 2 seconds if not showing access messages
+  if (millis() > accessMessageUntil && millis() - lastTempPrint > 2000) {
+    Serial.print("Temperature: ");
+    Serial.print(currentTemp);
+    Serial.print(" °C | Rain Sensor: ");
+    Serial.println(rainValue);  
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(currentTemp, 1);
+    lcd.print((char)223);
+    lcd.print("C");
+
+    // Fan logic based on temp and motion
+    if (fanShouldRun) {
+      if (currentTemp > 35.0) {
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        analogWrite(ENA, 255);
+        lcd.setCursor(0, 1);
+        lcd.print("Fan: HIGH      ");
+      } else if (currentTemp >= 33.0) {
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        analogWrite(ENA, 128);
+        lcd.setCursor(0, 1);
+        lcd.print("Fan: MEDIUM    ");
+      } else {
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        analogWrite(ENA, 0);
+        lcd.setCursor(0, 1);
+        lcd.print("Fan: OFF       ");
+      }
+    } else {
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      analogWrite(ENA, 0);
+      lcd.setCursor(0, 1);
+      lcd.print("Fan: OFF (No M)");
+    }
+
+    lastTempPrint = millis();
+  }
+
+  // RFID card check
+  if (getID()) {
+    Serial.print("Card ID: ");
+    Serial.println(tagID);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Card ID:");
+    lcd.setCursor(0, 1);
+    lcd.print(tagID);
+
+    if (isAuthorized(tagID)) {
+      Serial.println("Access Granted!");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Access Granted");
+      myServo.write(180);
+      delay(3000);
+      myServo.write(0);
+    } else {
+      Serial.println("Access Denied!");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Access Denied!");
+      digitalWrite(BUZZER_PIN, HIGH);
+      delay(1000);
+      digitalWrite(BUZZER_PIN, LOW);
+    }
+
+    accessMessageUntil = millis() + 3000;
+    delay(2000);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Your Card");
+  }
+}
+
+boolean getID() {
+  if (!mfrc522.PICC_IsNewCardPresent()) return false;
+  if (!mfrc522.PICC_ReadCardSerial()) return false;
+
+  tagID = "";
+  for (uint8_t i = 0; i < 4; i++) {
+    tagID.concat(String(mfrc522.uid.uidByte[i], HEX));
+  }
+
+  tagID.toUpperCase();
+  mfrc522.PICC_HaltA();
+  return true;
+}
+
+boolean isAuthorized(String id) {
+  for (int i = 0; i < authorizedCount; i++) {
+    if (id == authorizedTags[i]) return true;
+  }
+  return false;
+}
+
+// float readTemperature() {
+//   int rawValue = analogRead(TEMP_PIN);
+//   float voltage = rawValue * (5.0 / 1023.0);
+//   float temperatureC = voltage * 100.0;
+//   return temperatureC;
+// }
+float readTemperature() {
+  long sum = 0;
+  const int samples = 10;
+
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(TEMP_PIN);
+    delay(5); // Small delay between readings
+  }
+
+  float average = sum / (float)samples;
+  float voltage = average * (5.0 / 1023.0);
+  float temperatureC = voltage * 100.0;
+  return temperatureC;
+}
